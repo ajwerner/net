@@ -7,13 +7,9 @@ package trace
 import (
 	"bytes"
 	"fmt"
-	"html/template"
 	"io"
-	"log"
 	"net/http"
 	"runtime"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,74 +39,6 @@ var buckets = []bucket{
 //
 // Most users will use the Events handler.
 func RenderEvents(w http.ResponseWriter, req *http.Request, sensitive bool) {
-	now := time.Now()
-	data := &struct {
-		Families []string // family names
-		Buckets  []bucket
-		Counts   [][]int // eventLog count per family/bucket
-
-		// Set when a bucket has been selected.
-		Family    string
-		Bucket    int
-		EventLogs eventLogs
-		Expanded  bool
-	}{
-		Buckets: buckets,
-	}
-
-	data.Families = make([]string, 0, len(families))
-	famMu.RLock()
-	for name := range families {
-		data.Families = append(data.Families, name)
-	}
-	famMu.RUnlock()
-	sort.Strings(data.Families)
-
-	// Count the number of eventLogs in each family for each error age.
-	data.Counts = make([][]int, len(data.Families))
-	for i, name := range data.Families {
-		// TODO(sameer): move this loop under the family lock.
-		f := getEventFamily(name)
-		data.Counts[i] = make([]int, len(data.Buckets))
-		for j, b := range data.Buckets {
-			data.Counts[i][j] = f.Count(now, b.MaxErrAge)
-		}
-	}
-
-	if req != nil {
-		var ok bool
-		data.Family, data.Bucket, ok = parseEventsArgs(req)
-		if !ok {
-			// No-op
-		} else {
-			data.EventLogs = getEventFamily(data.Family).Copy(now, buckets[data.Bucket].MaxErrAge)
-		}
-		if data.EventLogs != nil {
-			defer data.EventLogs.Free()
-			sort.Sort(data.EventLogs)
-		}
-		if exp, err := strconv.ParseBool(req.FormValue("exp")); err == nil {
-			data.Expanded = exp
-		}
-	}
-
-	famMu.RLock()
-	defer famMu.RUnlock()
-	if err := eventsTmpl().Execute(w, data); err != nil {
-		log.Printf("net/trace: Failed executing template: %v", err)
-	}
-}
-
-func parseEventsArgs(req *http.Request) (fam string, b int, ok bool) {
-	fam, bStr := req.FormValue("fam"), req.FormValue("b")
-	if fam == "" || bStr == "" {
-		return "", 0, false
-	}
-	b, err := strconv.Atoi(bStr)
-	if err != nil || b < 0 || b >= len(buckets) {
-		return "", 0, false
-	}
-	return fam, b, true
 }
 
 // An EventLog provides a log of events associated with a specific object.
@@ -415,118 +343,3 @@ func freeEventLog(el *eventLog) {
 	default:
 	}
 }
-
-var eventsTmplCache *template.Template
-var eventsTmplOnce sync.Once
-
-func eventsTmpl() *template.Template {
-	eventsTmplOnce.Do(func() {
-		eventsTmplCache = template.Must(template.New("events").Funcs(template.FuncMap{
-			"elapsed":   elapsed,
-			"trimSpace": strings.TrimSpace,
-		}).Parse(eventsHTML))
-	})
-	return eventsTmplCache
-}
-
-const eventsHTML = `
-<html>
-	<head>
-		<title>events</title>
-	</head>
-	<style type="text/css">
-		body {
-			font-family: sans-serif;
-		}
-		table#req-status td.family {
-			padding-right: 2em;
-		}
-		table#req-status td.active {
-			padding-right: 1em;
-		}
-		table#req-status td.empty {
-			color: #aaa;
-		}
-		table#reqs {
-			margin-top: 1em;
-		}
-		table#reqs tr.first {
-			{{if $.Expanded}}font-weight: bold;{{end}}
-		}
-		table#reqs td {
-			font-family: monospace;
-		}
-		table#reqs td.when {
-			text-align: right;
-			white-space: nowrap;
-		}
-		table#reqs td.elapsed {
-			padding: 0 0.5em;
-			text-align: right;
-			white-space: pre;
-			width: 10em;
-		}
-		address {
-			font-size: smaller;
-			margin-top: 5em;
-		}
-	</style>
-	<body>
-
-<h1>/debug/events</h1>
-
-<table id="req-status">
-	{{range $i, $fam := .Families}}
-	<tr>
-		<td class="family">{{$fam}}</td>
-
-	        {{range $j, $bucket := $.Buckets}}
-	        {{$n := index $.Counts $i $j}}
-		<td class="{{if not $bucket.MaxErrAge}}active{{end}}{{if not $n}}empty{{end}}">
-	                {{if $n}}<a href="?fam={{$fam}}&b={{$j}}{{if $.Expanded}}&exp=1{{end}}">{{end}}
-		        [{{$n}} {{$bucket.String}}]
-			{{if $n}}</a>{{end}}
-		</td>
-                {{end}}
-
-	</tr>{{end}}
-</table>
-
-{{if $.EventLogs}}
-<hr />
-<h3>Family: {{$.Family}}</h3>
-
-{{if $.Expanded}}<a href="?fam={{$.Family}}&b={{$.Bucket}}">{{end}}
-[Summary]{{if $.Expanded}}</a>{{end}}
-
-{{if not $.Expanded}}<a href="?fam={{$.Family}}&b={{$.Bucket}}&exp=1">{{end}}
-[Expanded]{{if not $.Expanded}}</a>{{end}}
-
-<table id="reqs">
-	<tr><th>When</th><th>Elapsed</th></tr>
-	{{range $el := $.EventLogs}}
-	<tr class="first">
-		<td class="when">{{$el.When}}</td>
-		<td class="elapsed">{{$el.ElapsedTime}}</td>
-		<td>{{$el.Title}}
-	</tr>
-	{{if $.Expanded}}
-	<tr>
-		<td class="when"></td>
-		<td class="elapsed"></td>
-		<td><pre>{{$el.Stack|trimSpace}}</pre></td>
-	</tr>
-	{{range $el.Events}}
-	<tr>
-		<td class="when">{{.WhenString}}</td>
-		<td class="elapsed">{{elapsed .Elapsed}}</td>
-		<td>.{{if .IsErr}}E{{else}}.{{end}}. {{.What}}</td>
-	</tr>
-	{{end}}
-	{{end}}
-	{{end}}
-</table>
-{{end}}
-	</body>
-</html>
-`

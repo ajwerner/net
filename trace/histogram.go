@@ -7,14 +7,9 @@ package trace
 // This file implements histogramming for RPC statistics collection.
 
 import (
-	"bytes"
 	"fmt"
-	"html/template"
-	"log"
-	"math"
-	"sync"
-
 	"golang.org/x/net/internal/timeseries"
+	"math"
 )
 
 const (
@@ -319,6 +314,7 @@ func (h *histogram) newData() *data {
 	}
 }
 
+/*
 func (h *histogram) html() template.HTML {
 	buf := new(bytes.Buffer)
 	if err := distTmpl().Execute(buf, h.newData()); err != nil {
@@ -363,3 +359,4 @@ func distTmpl() *template.Template {
 	})
 	return distTmplCache
 }
+*/
